@@ -1,0 +1,90 @@
+---
+name: Sync json to S3
+
+on:
+  push:
+    branches: [protofire]
+    paths:
+      - "index.calldata.json"
+      - "index.eip712.json"
+      - "registry/**"
+      - "ercs/**"
+      - ".github/workflows/sync-s3.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+# What to upload, one repo-relative path per line ("#" lines are ignored).
+# Keep `on.push.paths` above in step with these lists.
+env:
+  # Copied as-is.
+  SYNC_FILES: |
+    index.calldata.json
+    index.eip712.json
+  # Synced recursively, *.json only. JSON files removed from the repo are
+  # removed from S3 too (--delete); other objects are left untouched.
+  SYNC_DIRS: |
+    registry
+    ercs
+
+jobs:
+  sync-to-s3:
+    name: sync files to S3
+    runs-on: w3-runner
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        timeout-minutes: 10
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Configure AWS credentials
+        timeout-minutes: 5
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Sync files to S3 bucket
+        timeout-minutes: 10
+        env:
+          S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+          S3_PREFIX: ${{ secrets.S3_PREFIX }}
+        run: |
+          set -euo pipefail
+          # Trim leading/trailing slashes so "erc7730", "/erc7730/" etc. all work.
+          S3_PREFIX="${S3_PREFIX#/}"; S3_PREFIX="${S3_PREFIX%/}"
+          if [ -z "${S3_PREFIX}" ]; then
+            echo "::error::S3_PREFIX secret is empty; refusing to sync to the bucket root."
+            exit 1
+          fi
+          DEST="s3://${S3_BUCKET_NAME}/${S3_PREFIX}"
+
+          # Parse the lists and check every path exists before uploading anything.
+          files=(); dirs=()
+          while read -r f; do
+            case "$f" in ''|'#'*) continue ;; esac
+            [ -f "$f" ] || { echo "::error::SYNC_FILES: '$f' is not a file"; exit 1; }
+            files+=("$f")
+          done <<< "${SYNC_FILES}"
+          while read -r d; do
+            case "$d" in ''|'#'*) continue ;; esac
+            d="${d%/}"
+            [ -d "$d" ] || { echo "::error::SYNC_DIRS: '$d' is not a directory"; exit 1; }
+            dirs+=("$d")
+          done <<< "${SYNC_DIRS}"
+
+          for f in "${files[@]}"; do
+            aws s3 cp "./${f}" "${DEST}/${f}" --no-progress
+          done
+
+          # S3 filters match across "/", so "*.json" is recursive.
+          for d in "${dirs[@]}"; do
+            aws s3 sync "./${d}" "${DEST}/${d}" --delete --no-progress \
+              --exclude "*" --include "*.json"
+          done
