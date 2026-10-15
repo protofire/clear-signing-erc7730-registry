@@ -9,6 +9,7 @@ on:
       - "index.eip712.json"
       - "registry/**"
       - "ercs/**"
+      - "auditors/**"
       - ".github/workflows/sync-s3.yml"
   workflow_dispatch:
 
@@ -31,6 +32,7 @@ env:
   SYNC_DIRS: |
     registry
     ercs
+    auditors
 
 jobs:
   sync-to-s3:
